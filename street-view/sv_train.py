@@ -35,14 +35,16 @@ def parse_arguments():
                         default=16)
     parser.add_argument('--num_epochs',
                         type=int,
-                        default=20)
+                        default=30)
     parser.add_argument('--lr_decay_rate',
                         type=float,
                         default=0.7)
     parser.add_argument('--lr_decay_epochs',
                         type=int,
                         default=10)
-
+    parser.add_argument('--model_ckpt_path',
+                        type=str,
+                        default="")
     return parser.parse_args()
 
 
@@ -95,29 +97,67 @@ def train_embedding(model, model_name, dataloaders, criterion, optimizer, num_ep
             running_loss = 0.0
             stats = {'T': 0, 'F': 0}
 
-            # Iterate over data.
-            for anc_images, pos_images, neg_images in tqdm(dataloaders[phase]):
+            # # Iterate over data.
+            # for anc_images, pos_images, neg_images in tqdm(dataloaders[phase]):
+            #     # forward
+            #     # track history if only in train
+            #     with torch.set_grad_enabled(phase == 'train'):
+            #         # print(anc_images)
+            #         anc_images = anc_images.to(device)  # anc_images
+            #         pos_images = pos_images.to(device)  # pos_images
+            #         neg_images = neg_images.to(device)  # neg_images
+            #
+            #         outputs1 = model(anc_images)
+            #         outputs2 = model(pos_images)
+            #         outputs3 = model(neg_images)
+            #         # zero the parameter gradients
+            #         optimizer.zero_grad()
+            #         # Get model outputs and calculate loss
+            #         distance1 = dist(outputs1, outputs2)
+            #         distance2 = dist(outputs1, outputs3)
+            #
+            #         labels = torch.ones(len(distance1))  # [1, ...]
+            #         labels = labels.to(device)
+            #         loss = criterion(distance2, distance1, target=labels)
+            #         print('batch loss:', loss.item())
+            #         # backward + optimize only if in training phase
+            #         if phase == 'train':
+            #             loss.backward()
+            #             optimizer.step()
+            # --- 【修改开始】优化进度条显示 ---
+            # 创建进度条对象，设置描述信息
+            pbar = tqdm(dataloaders[phase], desc=f"{phase} processing")
+
+            for anc_images, pos_images, neg_images in pbar:
                 # forward
                 # track history if only in train
                 with torch.set_grad_enabled(phase == 'train'):
-                    # print(anc_images)
-                    anc_images = anc_images.to(device)  # anc_images
-                    pos_images = pos_images.to(device)  # pos_images
-                    neg_images = neg_images.to(device)  # neg_images
+                    if phase == 'train':
+                        anc_images = RandomRotationNew(anc_images)
+                        pos_images = RandomRotationNew(pos_images)
+                        neg_images = RandomRotationNew(neg_images)
+
+                    anc_images = anc_images.to(device)
+                    pos_images = pos_images.to(device)
+                    neg_images = neg_images.to(device)
 
                     outputs1 = model(anc_images)
                     outputs2 = model(pos_images)
                     outputs3 = model(neg_images)
-                    # zero the parameter gradients
+
                     optimizer.zero_grad()
-                    # Get model outputs and calculate loss
+
                     distance1 = dist(outputs1, outputs2)
                     distance2 = dist(outputs1, outputs3)
-
-                    labels = torch.ones(len(distance1))  # [1, ...]
+                    labels = torch.ones(len(distance1))
                     labels = labels.to(device)
                     loss = criterion(distance2, distance1, target=labels)
-                    print('batch loss:', loss.item())
+
+                    # --- 【核心修改】注释掉 print，改用进度条后缀显示 Loss ---
+                    # print('batch loss:', loss.item())
+                    pbar.set_postfix({'loss': '{:.4f}'.format(loss.item())})
+                    # ---------------------------------------------------
+
                     # backward + optimize only if in training phase
                     if phase == 'train':
                         loss.backward()
@@ -220,14 +260,14 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print('device:', device)
     args = parse_arguments()
-    data_dir = ""
-    media_dir = ""
+    data_dir = "street_view_images"
+    media_dir = "street-view"
 
-    train_csv_path = ""
+    train_csv_path = "train_pairs_street_view.csv"
     train_csv = csv.reader(open(train_csv_path, encoding='UTF-8-sig'))
     train_path_list = list(train_csv)  # [6666/name.jpg, 6667/name.jpg, 6668/name.jpg]
 
-    val_path_path = ""
+    val_path_path = "val_pairs_street_view.csv"
     val_csv = csv.reader(open(val_path_path, encoding='UTF-8-sig'))
     val_path_list = list(val_csv)
 
@@ -245,7 +285,30 @@ if __name__ == "__main__":
                                       shuffle=True, num_workers=0) for x in ['train', 'val']}
 
     model = PlaceImageSkipGram(embedding_dim=args.embedding_dim)
-    model.load_CNN_params("")
+    # model.load_CNN_params("")
+    # model = model.to(device)
+    # 【修改点 4】智能加载权重逻辑
+    # 如果你在命令行指定了ckpt路径，就加载指定的；否则加载 ImageNet 官方预训练权重
+    if args.model_ckpt_path and os.path.exists(args.model_ckpt_path):
+        model.load_CNN_params(args.model_ckpt_path)
+    else:
+        print("未指定本地权重，正在尝试加载 ImageNet 预训练权重...")
+        try:
+            # 方案 A: 尝试使用 torchvision 新版 API
+            from torchvision.models import inception_v3, Inception_V3_Weights
+
+            weights = Inception_V3_Weights.DEFAULT
+            # 加载权重到 model.inception3 子模块中，strict=False 忽略全连接层的差异
+            model.inception3.load_state_dict(weights.get_state_dict(progress=True), strict=False)
+            print("成功加载 ImageNet 权重 (Inception_V3_Weights)")
+        except:
+            # 方案 B: 旧版兼容写法
+            from torchvision.models import inception_v3
+
+            pretrained_net = inception_v3(pretrained=True)
+            model.inception3.load_state_dict(pretrained_net.state_dict(), strict=False)
+            print("成功加载 ImageNet 权重 (pretrained=True)")
+
     model = model.to(device)
 
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate, betas=(0.9, 0.999), eps=1e-08,
